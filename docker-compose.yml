@@ -1,26 +1,211 @@
-networks:
-  bigdata-net:
-    driver: bridge
-
-volumes:
-  postgres_data:
-  mongo_data:
-  hadoop_namenode:
-  hadoop_datanode:
-  kafka_data:
-
 services:
+
   # ==========================================
-  # 1. BASE DE DATOS RELACIONAL (SQL)
+  # CAPA 1 - HADOOP 2.7.4 + YARN
   # ==========================================
-  postgres:
-    image: postgres:15-alpine
-    container_name: postgres_db
-    restart: always
+
+  namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop2.7.4-java8
+    container_name: namenode
+    hostname: namenode
+    restart: unless-stopped
     environment:
-      POSTGRES_USER: admin
-      POSTGRES_PASSWORD: adminpassword
-      POSTGRES_DB: bigdata_db
+      CLUSTER_NAME: bigdata-cluster
+    env_file:
+      - hadoop.env
+    ports:
+      - "50070:50070"
+      - "8020:8020"
+    volumes:
+      - namenode_data:/hadoop/dfs/name
+    networks:
+      - bigdata-net
+
+  datanode:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop2.7.4-java8
+    container_name: datanode
+    hostname: datanode
+    restart: unless-stopped
+    environment:
+      SERVICE_PRECONDITION: "namenode:50070"
+    env_file:
+      - hadoop.env
+    ports:
+      - "50075:50075"
+    volumes:
+      - datanode_data:/hadoop/dfs/data
+    depends_on:
+      - namenode
+    networks:
+      - bigdata-net
+
+  resourcemanager:
+    image: bde2020/hadoop-resourcemanager:2.0.0-hadoop2.7.4-java8
+    container_name: resourcemanager
+    hostname: resourcemanager
+    restart: unless-stopped
+    environment:
+      SERVICE_PRECONDITION: "namenode:50070 datanode:50075"
+    env_file:
+      - hadoop.env
+    ports:
+      - "8088:8088"
+    depends_on:
+      - namenode
+      - datanode
+    networks:
+      - bigdata-net
+
+  nodemanager:
+    image: bde2020/hadoop-nodemanager:2.0.0-hadoop2.7.4-java8
+    container_name: nodemanager
+    hostname: nodemanager
+    restart: unless-stopped
+    environment:
+      SERVICE_PRECONDITION: "namenode:50070 datanode:50075 resourcemanager:8088"
+      YARN_CONF_yarn_scheduler_minimum_allocation_mb: 256
+      YARN_CONF_yarn_scheduler_maximum_allocation_mb: 2048
+      YARN_CONF_yarn_nodemanager_resource_memory_mb: 2048
+    env_file:
+      - hadoop.env
+    ports:
+      - "8042:8042"
+    depends_on:
+      - resourcemanager
+    networks:
+      - bigdata-net
+
+  # ==========================================
+  # CAPA 2 - SPARK 3.5.0
+  # ==========================================
+
+  sparkmaster:
+    image: bitnamilegacy/spark:3.5.0
+    container_name: sparkmaster
+    hostname: sparkmaster
+    restart: unless-stopped
+    environment:
+      SPARK_MODE: master
+      SPARK_MASTER_HOST: sparkmaster
+      SPARK_MASTER_PORT: 7077
+      SPARK_RPC_AUTHENTICATION_ENABLED: "no"
+    ports:
+      - "7077:7077"
+      - "8080:8080"
+    networks:
+      - bigdata-net
+
+  sparkworker:
+    image: bitnamilegacy/spark:3.5.0
+    container_name: sparkworker
+    hostname: sparkworker
+    restart: unless-stopped
+    environment:
+      SPARK_MODE: worker
+      SPARK_MASTER_URL: spark://sparkmaster:7077
+      SPARK_WORKER_MEMORY: 2G
+      SPARK_WORKER_CORES: 2
+      SPARK_RPC_AUTHENTICATION_ENABLED: "no"
+    ports:
+      - "8081:8081"
+    depends_on:
+      - sparkmaster
+    networks:
+      - bigdata-net
+
+  # ==========================================
+  # CAPA 3 - KAFKA 3.8.0
+  # ==========================================
+
+  kafka:
+    image: apache/kafka:3.8.0
+    container_name: kafka
+    hostname: kafka
+    restart: unless-stopped
+    ports:
+      - "9094:9094"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: INTERNAL://:9092,CONTROLLER://:9093,EXTERNAL://:9094
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    networks:
+      - bigdata-net
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    restart: unless-stopped
+    environment:
+      KAFKA_CLUSTERS_0_NAME: bigdata
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+    ports:
+      - "8082:8080"
+    depends_on:
+      - kafka
+    networks:
+      - bigdata-net
+
+  # ==========================================
+  # CAPA 4 - MONGODB 7.0
+  # ==========================================
+
+  mongodb:
+    image: mongo:7.0
+    container_name: mongodb
+    hostname: mongodb
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD}
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - bigdata-net
+
+  mongo-express:
+    image: mongo-express:latest
+    container_name: mongo-express
+    restart: unless-stopped
+    environment:
+      ME_CONFIG_MONGODB_URL: mongodb://${MONGO_INITDB_ROOT_USERNAME}:${MONGO_INITDB_ROOT_PASSWORD}@mongodb:27017/?authSource=admin
+      ME_CONFIG_BASICAUTH_USERNAME: admin
+      ME_CONFIG_BASICAUTH_PASSWORD: bigdatapassword
+    ports:
+      - "8083:8081"
+    depends_on:
+      - mongodb
+    networks:
+      - bigdata-net
+
+  # ==========================================
+  # CAPA 4 - POSTGRESQL 16
+  # ==========================================
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    hostname: postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
     ports:
       - "5432:5432"
     volumes:
@@ -28,131 +213,79 @@ services:
     networks:
       - bigdata-net
 
-  # ==========================================
-  # 2. BASE DE DATOS NO SQL
-  # ==========================================
-  mongodb:
-    image: mongo:latest
-    container_name: mongodb
-    restart: always
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: pgadmin
+    restart: unless-stopped
     environment:
-      MONGO_INITDB_ROOT_USERNAME: admin
-      MONGO_INITDB_ROOT_PASSWORD: adminpassword
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD}
     ports:
-      - "27017:27017"
-    volumes:
-      - mongo_data:/data/db
-    networks:
-      - bigdata-net
-
-  # ==========================================
-  # 3. MENSAJERÍA Y STREAMING (APACHE KAFKA 3.8.0 - KRaft)
-  # ==========================================
-  kafka:
-    image: apache/kafka:3.8.0
-    container_name: kafka
-    hostname: kafka
-    ports:
-      - "9092:9092"
-      - "9094:9094"
-    environment:
-      KAFKA_NODE_ID: 1
-      KAFKA_PROCESS_ROLES: broker,controller
-      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:9094
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:9094
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
-      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
-      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
-      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
-      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
-    volumes:
-      - kafka_data:/var/lib/kafka/data
-    networks:
-      - bigdata-net
-
-  # ==========================================
-  # 4. ALMACENAMIENTO DISTRIBUIDO (APACHE HADOOP 3.4.0)
-  # ==========================================
-  namenode:
-    image: apache/hadoop:3.4.0
-    container_name: namenode
-    hostname: namenode
-    command: ["hdfs", "namenode"]
-    environment:
-      HADOOP_HOME: /opt/hadoop
-      HDFS_CONF_dfs_namenode_rpc_address: "namenode:9000"
-      HDFS_CONF_dfs_namenode_name_dir: "file:///hadoop/dfs/name"
-    ports:
-      - "9870:9870"
-      - "9000:9000"
-    volumes:
-      - hadoop_namenode:/hadoop/dfs/name
-    networks:
-      - bigdata-net
-
-  datanode:
-    image: apache/hadoop:3.4.0
-    container_name: datanode
-    hostname: datanode
-    command: ["hdfs", "datanode"]
+      - "5050:80"
     depends_on:
-      - namenode
-    environment:
-      HADOOP_HOME: /opt/hadoop
-      HDFS_CONF_dfs_namenode_rpc_address: "namenode:9000"
-      HDFS_CONF_dfs_datanode_data_dir: "file:///hadoop/dfs/data"
-    ports:
-      - "9864:9864"
-    volumes:
-      - hadoop_datanode:/hadoop/dfs/data
-    networks:
-      - bigdata-net
-
-  # ==========================================
-  # 5. PROCESAMIENTO DISTRIBUIDO (APACHE SPARK 3.5.0)
-  # ==========================================
-  spark-master:
-    image: apache/spark:3.5.0
-    container_name: spark-master
-    hostname: spark-master
-    command: /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
-    ports:
-      - "8080:8080"
-      - "7077:7077"
-    networks:
-      - bigdata-net
-
-  spark-worker:
-    image: apache/spark:3.5.0
-    container_name: spark-worker
-    hostname: spark-worker
-    depends_on:
-      - spark-master
-    command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
-    ports:
-      - "8081:8081"
-    networks:
-      - bigdata-net
-      
-  # ==========================================
-  # 6. ENTORNO PYTHON Y AUTOMATIZACIÓN (JUPYTER)
-  # ==========================================
-  jupyter:
-    image: jupyter/pyspark-notebook:latest
-    container_name: jupyter_bigdata
-    depends_on:
-      - spark-master
       - postgres
-      - mongodb
-      - kafka
+    networks:
+      - bigdata-net
+
+  # ==========================================
+  # MYSQL 8.0 -
+  # ==========================================
+
+  mysql:
+    image: mysql:8.0
+    container_name: mysql
+    hostname: mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./mysql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - bigdata-net
+
+  # ==========================================
+  # CAPA 5 - JUPYTER + CONDA
+  # ==========================================
+
+  jupyter:
+    image: quay.io/jupyter/minimal-notebook:latest
+    container_name: jupyter
+    hostname: jupyter
+    restart: unless-stopped
+    environment:
+      JUPYTER_TOKEN: ${JUPYTER_TOKEN}
     ports:
       - "8888:8888"
-    environment:
-      - JUPYTER_ENABLE_LAB=yes
-      - JUPYTER_TOKEN=bigdata
     volumes:
       - ./notebooks:/home/jovyan/work
     networks:
       - bigdata-net
+
+
+
+# ==========================================
+# VOLUMENES
+# ==========================================
+
+volumes:
+  namenode_data:
+  datanode_data:
+  kafka_data:
+  mongodb_data:
+  postgres_data:
+  mysql_data:
+  flume_ingest:
+
+# ==========================================
+# RED
+# ==========================================
+
+networks:
+  bigdata-net:
+    driver: bridge
