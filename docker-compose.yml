@@ -4,18 +4,20 @@ networks:
 
 volumes:
   hadoop_namenode:
+  hadoop_datanode:
   hadoop_datanode1:
   hadoop_datanode2:
   postgres_data:
   mongo_data:
   jupyter_notebooks:
+  mysql_data:
 
 services:
   # ==========================================
   # 1. BASE DE DATOS SQL: PostgreSQL
   # ==========================================
   postgres:
-    image: postgres:15-alpine
+    image: postgres:16-alpine
     container_name: postgres_db
     restart: always
     environment:
@@ -47,9 +49,8 @@ services:
   # 2. BASE DE DATOS NoSQL: MongoDB
   # ==========================================
   mongodb:
-    image: mongo:6.0
+    image: mongo:7.0
     container_name: mongo_db
-    restart: always
     environment:
       MONGO_INITDB_ROOT_USERNAME: root
       MONGO_INITDB_ROOT_PASSWORD: rootpassword
@@ -63,7 +64,6 @@ services:
   mongo-express:
     image: mongo-express
     container_name: mongo_express_ui
-    restart: always
     ports:
       - "8081:8081"
     environment:
@@ -75,8 +75,24 @@ services:
     depends_on:
       - mongodb
 
+  mysql:
+    image: mysql:8.0
+    container_name: mysql_ventas
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: ventas_db
+      MYSQL_USER: sqoopuser
+      MYSQL_PASSWORD: sqooppassword
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    networks:
+      - bigdata-net
+
   # ==========================================
-  # 3. STREAMING: Apache Kafka 3.8.0 (KRaft Mode)
+  # 3. STREAMING: APACHE KAFKA
   # ==========================================
   kafka:
     image: apache/kafka:3.8.0
@@ -103,54 +119,76 @@ services:
       - bigdata-net
 
   # ==========================================
-  # 4. ALMACENAMIENTO DISTRIBUIDO: Apache Hadoop 3.4.0
+  # 4. ALMACENAMIENTO DISTRIBUIDO: HADOOP
   # ==========================================
   namenode:
     image: apache/hadoop:3.4.0
-    container_name: hdfs_namenode
-    restart: always
-    command: ["sh", "-c", "if [ ! -d /tmp/hadoop-root/dfs/name/current ]; then hdfs namenode -format; fi && hdfs namenode"]
-    ports:
-      - "9870:9870"
-      - "9000:9000"
+    container_name: hadoop_namenode
+    hostname: namenode
     environment:
-      HADOOP_HOME: /opt/hadoop
-      HDFS_CONF_dfs_replication: 2
-      HDFS_CONF_dfs_permissions_enabled: "false"
+      ENSURE_NAMENODE_DIR: "/tmp/hadoop-root/dfs/name/current"
+      CORE-SITE.XML_fs.defaultFS: "hdfs://namenode:9000"
+      HDFS-SITE.XML_dfs.namenode.rpc-address: "namenode:9000"
+      HDFS-SITE.XML_dfs.replication: "1"
+    command: ["hdfs", "namenode"]
+    ports:
+      - "9870:9870" # UI Web NameNode
+      - "9000:9000" # IPC HDFS
     volumes:
       - hadoop_namenode:/tmp/hadoop-root/dfs/name
     networks:
       - bigdata-net
 
-  datanode1:
-    image: apache/hadoop:3.4.0
-    container_name: hdfs_datanode1
-    restart: always
-    command: ["hdfs", "datanode"]
-    environment:
-      HADOOP_HOME: /opt/hadoop
-      CORE_CONF_fs_defaultFS: hdfs://namenode:9000
-    volumes:
-      - hadoop_datanode1:/tmp/hadoop-root/dfs/data
-    networks:
-      - bigdata-net
-    depends_on:
-      - namenode
+  datanode:
+      image: apache/hadoop:3.4.0
+      container_name: hadoop_datanode
+      hostname: datanode
+      environment:
+        CORE-SITE.XML_fs.defaultFS: "hdfs://namenode:9000"
+        HDFS-SITE.XML_dfs.namenode.rpc-address: "namenode:9000"
+        HDFS-SITE.XML_dfs.datanode.data.dir: "file:///data/dfs/data"
+      command: ["hdfs", "datanode"]
+      depends_on:
+        - namenode
+      volumes:
+        - hadoop_datanode:/data
+      networks:
+        - bigdata-net
 
-  datanode2:
+  # ==========================================
+  # 5. HADOOP YARN: GESTIÓN DE RECURSOS
+  # ==========================================
+
+  resourcemanager:
     image: apache/hadoop:3.4.0
-    container_name: hdfs_datanode2
+    container_name: hadoop_resourcemanager
     restart: always
-    command: ["hdfs", "datanode"]
-    environment:
-      HADOOP_HOME: /opt/hadoop
-      CORE_CONF_fs_defaultFS: hdfs://namenode:9000
+    command: ["yarn", "resourcemanager"]
+    ports:
+      - "8088:8088"
     volumes:
-      - hadoop_datanode2:/tmp/hadoop-root/dfs/data
+      - ./hadoop-config/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml:ro
+      - ./hadoop-config/hdfs-site.xml:/opt/hadoop/etc/hadoop/hdfs-site.xml:ro
+      - ./hadoop-config/yarn-site.xml:/opt/hadoop/etc/hadoop/yarn-site.xml:ro
+    networks:
+      - bigdata-net
+
+  nodemanager:
+    image: apache/hadoop:3.4.0
+    container_name: hadoop_nodemanager
+    restart: always
+    command: ["yarn", "nodemanager"]
+    ports:
+      - "8042:8042"
+    volumes:
+      - ./hadoop-config/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml:ro
+      - ./hadoop-config/hdfs-site.xml:/opt/hadoop/etc/hadoop/hdfs-site.xml:ro
+      - ./hadoop-config/yarn-site.xml:/opt/hadoop/etc/hadoop/yarn-site.xml:ro
     networks:
       - bigdata-net
     depends_on:
-      - namenode
+      - resourcemanager
+
 
   # ==========================================
   # 5. PROCESAMIENTO: Apache Spark 3.5.0 (Oficial)
@@ -158,23 +196,40 @@ services:
   spark-master:
     image: apache/spark:3.5.0
     container_name: spark_master
-    restart: always
-    command: ["/opt/spark/sbin/start-master.sh"]
+    environment:
+      - SPARK_NO_DAEMONIZE=true
     ports:
-      - "8080:8080"
-      - "7077:7077"
+      - "8080:8080" # UI Web Spark Master
+      - "7077:7077" # Puerto del Master
+    command: "/opt/spark/sbin/start-master.sh"
     networks:
       - bigdata-net
 
-  spark-worker-1:
+  sqoop:
+    image: sqoop-bigdata:1.4.7
+    container_name: sqoop_client
+    hostname: sqoop
+    depends_on:
+      - mysql
+      - namenode
+    networks:
+      - bigdata-net
+    volumes:
+      - ./hadoop-config/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml
+      - ./hadoop-config/hdfs-site.xml:/opt/hadoop/etc/hadoop/hdfs-site.xml
+    stdin_open: true
+    tty: true
+    command: ["bash", "-c", "sleep infinity"]
+
+  spark-worker:
     image: apache/spark:3.5.0
-    container_name: spark_worker_1
-    restart: always
+    container_name: spark_worker
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_NO_DAEMONIZE=true
     depends_on:
       - spark-master
-    ports:
-      - "8081:8081"
-    command: ["/opt/spark/sbin/start-worker.sh", "spark://spark-master:7077"]
+    command: "/opt/spark/sbin/start-worker.sh spark://spark-master:7077"
     networks:
       - bigdata-net
 
