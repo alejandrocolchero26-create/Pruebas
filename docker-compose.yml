@@ -191,7 +191,7 @@ services:
 
 
   # ==========================================
-  # 5. PROCESAMIENTO: Apache Spark 3.5.0 (Oficial)
+  # 6. PROCESAMIENTO: Apache Spark 3.5.0 (Oficial)
   # ==========================================
   spark-master:
     image: apache/spark:3.5.0
@@ -236,7 +236,7 @@ services:
 
 
   # ==========================================
-  # 6. ENTORNO DE ANALÍTICA / PYTHON (ANACONDA/JUPYTER)
+  # 7. ENTORNO DE ANALÍTICA / PYTHON (ANACONDA/JUPYTER)
   # ==========================================
   jupyter-pyspark:
     image: jupyter/pyspark-notebook:latest
